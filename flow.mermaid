@@ -1,0 +1,39 @@
+graph LR
+    subgraph "User Requests (Concurrent)"
+        U1[User 1 Request]
+        U2[User 2 Request]
+        UN[User N Request]
+    end
+
+    subgraph "Web Server (Concurrent Handlers)"
+        H1[HTTP Handler 1]
+        H2[HTTP Handler 2]
+        HN[HTTP Handler N]
+    end
+
+    subgraph "Database Interaction"
+      BS[Shared Batch Service]
+      DB[(PostgreSQL via pgx.Batch)]
+    end
+
+    U1 --> H1
+    U2 --> H2
+    UN --> HN
+
+    H1 -- Enqueue Query 1 & Wait --> BS
+    H2 -- Enqueue Query 2 & Wait --> BS
+    HN -- Enqueue Query N & Wait --> BS
+
+    BS -- Send Batch (Queries 1, 2..N) --> DB
+    DB -- Return Batch Results --> BS
+
+    BS -- Send Result 1 --> H1
+    BS -- Send Result 2 --> H2
+    BS -- Send Result N --> HN
+
+    H1 --> R1[User 1 Response]
+    H2 --> R2[User 2 Response]
+    HN --> RN[User N Response]
+
+    style BS fill:#f9f,stroke:#333,stroke-width:2px
+    style DB fill:#ccf,stroke:#333,stroke-width:2px
