@@ -328,30 +328,40 @@ func main() {
 
 	// Print comprehensive comparison
 	fmt.Println("\n\n=== COMPARISON OF ALL SIMULATIONS ===")
-	fmt.Println("Mode\t\t\t\tExecution Time\tRequests/sec\tImprovement")
-	fmt.Println("-----------------------------------------------------------------------")
+	colWidthMode := 28
+	colWidthTime := 18
+	colWidthRPS := 15
+	colWidthImp := 15
+
+	fmt.Printf("%-*s %-*s %-*s %-*s\n",
+		colWidthMode, "Mode",
+		colWidthTime, "Execution Time",
+		colWidthRPS, "Requests/sec",
+		colWidthImp, "Improvement")
+	fmt.Println("----------------------------------------------------------------------------")
 
 	directResult := results[0]
-	fmt.Printf("DIRECT\t \t \t \t%v\t%.2f\t-\n",
-		directResult.executionTime,
-		directResult.reqPerSec)
+	fmt.Printf("%-*s %-*v %-*.2f %*s\n",
+		colWidthMode, "DIRECT",
+		colWidthTime, directResult.executionTime,
+		colWidthRPS, directResult.reqPerSec,
+		colWidthImp, "-")
 
 	for i := 1; i < len(results); i++ {
 		result := results[i]
 		timeImprovement := (float64(directResult.executionTime) - float64(result.executionTime)) / float64(directResult.executionTime) * 100
 		//throughputImprovement := (result.reqPerSec - directResult.reqPerSec) / directResult.reqPerSec * 100
-
 		colorCode := getTimingColor(timeImprovement)
 		resetCode := resetColor()
 
-		fmt.Printf("BATCHED (window: %v)\t%v\t%.2f\t%s%.2f%%%s\n",
-			result.config.BatchWindow,
-			result.executionTime,
-			result.reqPerSec,
-			colorCode,
-			timeImprovement,
-			resetCode,
-		)
+		modeStr := fmt.Sprintf("BATCHED (window: %v)", result.config.BatchWindow)
+		improvementStr := fmt.Sprintf("%s%.2f%%%s", colorCode, timeImprovement, resetCode)
+
+		fmt.Printf("%-*s %-*v %-*.2f %s\n",
+			colWidthMode, modeStr,
+			colWidthTime, result.executionTime,
+			colWidthRPS, result.reqPerSec,
+			improvementStr)
 	}
 
 	// Find optimal batch window
