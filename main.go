@@ -36,6 +36,7 @@ type SimulationConfig struct {
 	BurstCount         int
 	TimeBetweenBursts  time.Duration
 	DirectMode         bool
+	BatchWindow        time.Duration // Added BatchWindow to config
 }
 
 // RequestHandler simulates handling a request in a goroutine
@@ -145,7 +146,7 @@ func SimulateBurst(burstID int, config SimulationConfig) time.Duration {
 func RunSimulation(config SimulationConfig) time.Duration {
 	mode := "DIRECT"
 	if !config.DirectMode {
-		mode = "BATCHED"
+		mode = fmt.Sprintf("BATCHED (window: %v)", config.BatchWindow)
 	}
 
 	fmt.Printf("\n--- Starting %s mode simulation ---\n", mode)
@@ -182,7 +183,17 @@ func RunSimulation(config SimulationConfig) time.Duration {
 	return totalTime
 }
 
-// setupDatabase initializes database connection and batcher
+// setupBatcher creates a new batcher with the given batch window
+func setupBatcher(batchWindow time.Duration) *pgbatcher.Batcher {
+	options := pgbatcher.DefaultOptions()
+	options.BatchWindow = batchWindow
+	options.MaxBatchSize = 50
+	options.MaxConcurrentBatches = 5
+
+	return pgbatcher.New(pool, options)
+}
+
+// setupDatabase initializes database connection
 func setupDatabase() error {
 	// Get connection string from environment or use default
 	connString := os.Getenv("DATABASE_URL")
@@ -211,16 +222,26 @@ func setupDatabase() error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Create batcher with configured options
-	options := pgbatcher.DefaultOptions()
-	options.BatchWindow = 5 * time.Millisecond
-	options.MaxBatchSize = 50
-	options.MaxConcurrentBatches = 5
-
-	batcher = pgbatcher.New(pool, options)
-
 	fmt.Println("Connected to PostgreSQL database successfully!")
 	return nil
+}
+
+// getTimingColor returns ANSI color codes for timing comparison visualization
+func getTimingColor(improvement float64) string {
+	if improvement >= 30 {
+		return "\033[1;32m" // Bold green
+	} else if improvement >= 10 {
+		return "\033[32m" // Green
+	} else if improvement >= 0 {
+		return "\033[33m" // Yellow
+	} else {
+		return "\033[31m" // Red
+	}
+}
+
+// resetColor returns ANSI reset code
+func resetColor() string {
+	return "\033[0m"
 }
 
 func main() {
@@ -229,41 +250,128 @@ func main() {
 		log.Fatalf("Failed to set up database: %v", err)
 	}
 	defer pool.Close()
-	defer batcher.Close()
 
-	// Configure simulation
+	// base simulation parameters
 	baseConfig := SimulationConfig{
-		ConcurrentRequests: 100, // Simulate 100 concurrent HTTP requests
-		BurstCount:         20,  // Run 5 bursts
-		TimeBetweenBursts:  100 * time.Millisecond,
+		ConcurrentRequests: 100, // per burst
+		BurstCount:         20,
+		TimeBetweenBursts:  6 * time.Millisecond,
 	}
+
+	batchWindows := []time.Duration{
+		1 * time.Millisecond,
+		2 * time.Millisecond,
+		5 * time.Millisecond,
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		50 * time.Millisecond,
+	}
+
+	// Store results for comparison
+	type SimulationResult struct {
+		config        SimulationConfig
+		executionTime time.Duration
+		reqPerSec     float64
+	}
+	results := make([]SimulationResult, 0, len(batchWindows)+1)
 
 	// First run simulation with direct queries
 	directConfig := baseConfig
 	directConfig.DirectMode = true
-	directTime := RunSimulation(directConfig)
+	directConfig.BatchWindow = 0
 
-	// Short pause
+	directTime := RunSimulation(directConfig)
+	directReqPerSec := float64(baseConfig.ConcurrentRequests*baseConfig.BurstCount) / directTime.Seconds()
+
+	results = append(results, SimulationResult{
+		config:        directConfig,
+		executionTime: directTime,
+		reqPerSec:     directReqPerSec,
+	})
+
+	// Short pause between simulation types
 	time.Sleep(5 * time.Second)
 
-	// Then run simulation with batched queries
-	batchedConfig := baseConfig
-	batchedConfig.DirectMode = false
-	batchedTime := RunSimulation(batchedConfig)
+	// Run simulations with different batch windows
+	for _, window := range batchWindows {
+		fmt.Printf("\n\n--- TESTING BATCH WINDOW: %v ---\n", window)
 
-	// Compare results
-	improvement := (float64(directTime) - float64(batchedTime)) / float64(directTime) * 100
+		// Create a new batcher with this window
+		if batcher != nil {
+			batcher.Close()
+		}
+		batcher = setupBatcher(window)
 
-	fmt.Println("\n--- COMPARISON ---")
-	fmt.Printf("Direct execution: %v\n", directTime)
-	fmt.Printf("Batched execution: %v\n", batchedTime)
-	fmt.Printf("Time improvement: %.2f%%\n", improvement)
+		// Configure and run this simulation
+		batchedConfig := baseConfig
+		batchedConfig.DirectMode = false
+		batchedConfig.BatchWindow = window
+		batchedConfig.TimeBetweenBursts = window + 1*time.Millisecond // Ensure enough time between bursts
 
-	directReqPerSec := float64(baseConfig.ConcurrentRequests*baseConfig.BurstCount) / directTime.Seconds()
-	batchedReqPerSec := float64(baseConfig.ConcurrentRequests*baseConfig.BurstCount) / batchedTime.Seconds()
-	throughputImprovement := (batchedReqPerSec - directReqPerSec) / directReqPerSec * 100
+		batchedTime := RunSimulation(batchedConfig)
+		batchedReqPerSec := float64(baseConfig.ConcurrentRequests*baseConfig.BurstCount) / batchedTime.Seconds()
 
-	fmt.Printf("Direct throughput: %.2f req/sec\n", directReqPerSec)
-	fmt.Printf("Batched throughput: %.2f req/sec\n", batchedReqPerSec)
-	fmt.Printf("Throughput improvement: %.2f%%\n", throughputImprovement)
+		results = append(results, SimulationResult{
+			config:        batchedConfig,
+			executionTime: batchedTime,
+			reqPerSec:     batchedReqPerSec,
+		})
+
+		// Short pause between simulations
+		time.Sleep(3 * time.Second)
+	}
+
+	// Close the last batcher
+	if batcher != nil {
+		batcher.Close()
+	}
+
+	// Print comprehensive comparison
+	fmt.Println("\n\n=== COMPARISON OF ALL SIMULATIONS ===")
+	fmt.Println("Mode\t\t\t\tExecution Time\tRequests/sec\tImprovement")
+	fmt.Println("-----------------------------------------------------------------------")
+
+	directResult := results[0]
+	fmt.Printf("DIRECT\t \t \t \t%v\t%.2f\t-\n",
+		directResult.executionTime,
+		directResult.reqPerSec)
+
+	for i := 1; i < len(results); i++ {
+		result := results[i]
+		timeImprovement := (float64(directResult.executionTime) - float64(result.executionTime)) / float64(directResult.executionTime) * 100
+		//throughputImprovement := (result.reqPerSec - directResult.reqPerSec) / directResult.reqPerSec * 100
+
+		colorCode := getTimingColor(timeImprovement)
+		resetCode := resetColor()
+
+		fmt.Printf("BATCHED (window: %v)\t%v\t%.2f\t%s%.2f%%%s\n",
+			result.config.BatchWindow,
+			result.executionTime,
+			result.reqPerSec,
+			colorCode,
+			timeImprovement,
+			resetCode,
+		)
+	}
+
+	// Find optimal batch window
+	var bestResult SimulationResult
+	bestImprovement := -100.0
+
+	for i := 1; i < len(results); i++ {
+		improvement := (float64(directResult.executionTime) - float64(results[i].executionTime)) / float64(directResult.executionTime) * 100
+		if improvement > bestImprovement {
+			bestImprovement = improvement
+			bestResult = results[i]
+		}
+	}
+
+	fmt.Printf("\n\n=== SUMMARY ===\n")
+	fmt.Printf("Best performance: %s%.2f%%%s improvement with batch window of %v\n",
+		getTimingColor(bestImprovement),
+		bestImprovement,
+		resetColor(),
+		bestResult.config.BatchWindow)
+	fmt.Printf("Execution time: %v vs. %v (direct)\n", bestResult.executionTime, directResult.executionTime)
+	fmt.Printf("Throughput: %.2f req/sec vs. %.2f req/sec (direct)\n", bestResult.reqPerSec, directResult.reqPerSec)
 }
